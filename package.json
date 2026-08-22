@@ -1,0 +1,12 @@
+{
+  "name": "com.operit.version_snapshot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Git-free project snapshot management: file-level change streams, multi-mount, full .gitignore syntax, cross-version rollback/fork. Data lives in {pluginRoot}/snapshot/{ProjectID}/ (manifest.json + SQLite data.db), powered by Java bridge and Tools.Files only - no terminal required.",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

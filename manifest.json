@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.version_snapshot",
+  "version": "0.1.0",
+  "author": ["yyswys-yjyj"],
+  "main": "dist/main.js",
+  "display_name": {
+    "zh": "文件快照箱",
+    "en": "Version Snapshot",
+    "default": "Version Snapshot"
+  },
+  "description": {
+    "zh": "不依赖 git 的项目快照管理：文件级变更流水、多挂载点、.gitignore 完整语法、跨版本回滚/fork。数据存于 {插件根}/snapshot/{ProjectID}/（manifest.json + SQLite data.db），全部走 Java bridge 与 Tools.Files，不依赖终端。",
+    "en": "Git-free project snapshot management: file-level change streams, multi-mount, full .gitignore syntax, cross-version rollback/fork. Data lives in {pluginRoot}/snapshot/{ProjectID}/ (manifest.json + SQLite data.db), powered by Java bridge and Tools.Files only - no terminal required."
+  },
+  "enabled_by_default": true,
+  "subpackages": [
+    {
+      "id": "snapshotver",
+      "entry": "dist/packages/snapshotver.js",
+      "enabled_by_default": true,
+      "display_name": {
+        "zh": "文件快照管理",
+        "en": "VersionSnapshot Tools",
+        "default": "VersionSnapshot Tools"
+      },
+      "description": {
+        "zh": "init / manage / commit / show / list / diff / ChangeCommitNode / PullFromHistory / Rollback 九个快照工具。",
+        "en": "Nine snapshot tools: init / manage / commit / show / list / diff / ChangeCommitNode / PullFromHistory / Rollback."
+      }
+    }
+  ]
+}
