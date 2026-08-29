@@ -14,6 +14,15 @@ import { fileStateAt, snapshotHead, findSnapshotByDisplay, rebuildSnapshotTree }
 // ---- DestroyDatabase ----
 export async function doDestroyDatabase(ProjectID: string, params: any): Promise<any> {
   const pdir = projectDir(ProjectID);
+  if (String(params.confirm) !== 'true') {
+    return {
+      success: false,
+      code: 'CONFIRM_REQUIRED',
+      message: 'DestroyDatabase is IRREVERSIBLE - it permanently deletes ' + pdir +
+        ' (manifest.json + data.db + all history). Pass confirm=true to proceed.',
+      data: { ProjectID, pdir },
+    };
+  }
   if (!(await fsExists(pdir))) throw new Error('Project database not found: ' + ProjectID);
   await fsDelete(pdir, true);
   return { success: true, message: 'Destroyed database: ' + ProjectID, data: { ProjectID, pdir } };
@@ -296,6 +305,15 @@ export async function doPull(ProjectID: string, params: any): Promise<any> {
 // ---- Rollback ----
 export async function doRollback(ProjectID: string, params: any): Promise<any> {
   const { pdir, mf } = await requireProject(ProjectID);
+  if (String(params.confirm) !== 'true') {
+    return {
+      success: false,
+      code: 'CONFIRM_REQUIRED',
+      message: 'Rollback is IRREVERSIBLE: it rewrites project files to the target version and ' +
+        'deletes every snapshot after it. Pass confirm=true to proceed.',
+      data: { ProjectID, target: params.TargetVersion },
+    };
+  }
   const db = openDb(pdir + '/data.db');
   try {
     ensureSchema(db);

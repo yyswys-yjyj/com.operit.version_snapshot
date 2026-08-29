@@ -20,12 +20,43 @@ export interface ResolvedPath {
   relPath?: string;
 }
 
-export function projectDir(ProjectID: string): string {
-  if (!ProjectID || typeof ProjectID !== 'string') throw new Error('ProjectID cannot be empty');
-  if (/[\\/:*?"<>|\s]/.test(ProjectID)) {
-    throw new Error('ProjectID cannot contain \\ / : * ? " < > | or whitespace');
+// Canonical path check: resolve . / .. lexically to ensure a path stays
+// inside an allowed parent (defense against directory traversal).
+function canonicalInside(parent: string, child: string): boolean {
+  const stack: string[] = [];
+  const parts = child.split('/');
+  for (const seg of parts) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (stack.length) stack.pop();
+    } else {
+      stack.push(seg);
+    }
   }
-  return getSnapshotRoot() + '/' + ProjectID;
+  const norm = parent.split('/').filter(Boolean).join('/') + '/' + stack.join('/');
+  return norm === parent.split('/').filter(Boolean).join('/') || norm.startsWith(parent.split('/').filter(Boolean).join('/') + '/');
+}
+
+// Strict whitelist for project names: letters, digits, underscore, hyphen and
+// CJK. Explicitly rejects '.', '..' and any path separator to stop traversal.
+export function assertSafeProjectId(ProjectID: string): string {
+  if (!ProjectID || typeof ProjectID !== 'string') throw new Error('ProjectID cannot be empty');
+  const id = ProjectID.trim();
+  if (!id) throw new Error('ProjectID cannot be empty');
+  if (!/^[A-Za-z0-9_\-\u4e00-\u9fff]+$/.test(id)) {
+    throw new Error('ProjectID contains invalid characters; allow only letters, digits, _ - and CJK (rejected: ' + ProjectID + ')');
+  }
+  return id;
+}
+
+export function projectDir(ProjectID: string): string {
+  const id = assertSafeProjectId(ProjectID);
+  const root = getSnapshotRoot();
+  const p = root + '/' + id;
+  if (!canonicalInside(root, p)) {
+    throw new Error('ProjectID resolves outside the snapshot database root');
+  }
+  return p;
 }
 
 export async function loadManifest(pdir: string): Promise<Manifest | null> {
@@ -65,6 +96,20 @@ export function normalizeMounts(mf: Manifest): { [key: string]: string } {
   return mounts;
 }
 
+// Reject any relative path escaping the mount root ('.' or '..' segments,
+// backslashes). Called before any rel path is joined to a base directory.
+export function assertSafeRelPath(rel: string): string {
+  if (!rel) throw new Error('Relative path cannot be empty');
+  if (rel.indexOf('\\') >= 0) throw new Error('Backslash not allowed in relative path');
+  const parts = rel.split('/');
+  for (const seg of parts) {
+    if (seg === '.' || seg === '..') {
+      throw new Error('Path traversal denied: ' + rel);
+    }
+  }
+  return rel;
+}
+
 // Resolve a user RelPath into either { all:true } or { mount, relPath }.
 export function parseRelPath(mf: Manifest, input: string): ResolvedPath {
   const mounts = normalizeMounts(mf);
@@ -85,17 +130,17 @@ export function parseRelPath(mf: Manifest, input: string): ResolvedPath {
     const base = mounts[bestMount];
     const rel = s === base ? '' : s.slice(base.length).replace(/^\/+/, '');
     if (!rel) throw new Error('Cannot target a mount root itself; specify a file (or use . for all)');
-    return { mount: bestMount, relPath: rel };
+    return { mount: bestMount, relPath: assertSafeRelPath(rel) };
   }
   if (Object.keys(mounts).length > 1) {
     const idx = s.indexOf('/');
     if (idx <= 0) throw new Error('Multi-mount projects require a mount prefix (_main/xxx or {mountKey}/xxx), got: ' + s);
     const m = s.slice(0, idx);
     if (!(m in mounts)) throw new Error('Unknown mount key: ' + m + '; available: ' + Object.keys(mounts).join(', '));
-    return { mount: m, relPath: s.slice(idx + 1) };
+    return { mount: m, relPath: assertSafeRelPath(s.slice(idx + 1)) };
   }
-  if (s.startsWith('_main/')) return { mount: '_main', relPath: s.slice('_main/'.length) };
-  return { mount: '_main', relPath: s };
+  if (s.startsWith('_main/')) return { mount: '_main', relPath: assertSafeRelPath(s.slice('_main/'.length)) };
+  return { mount: '_main', relPath: assertSafeRelPath(s) };
 }
 
 // .gitignore rules from UseIgnore path + each mount root's own .gitignore.

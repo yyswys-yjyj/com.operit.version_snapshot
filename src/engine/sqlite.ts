@@ -26,7 +26,17 @@ export function dbExec(db: any, sql: string, args?: any[]): void {
 }
 
 export function dbQuery(db: any, sql: string, args?: any[]): SqlRow[] {
-  const cur = args && args.length ? db.rawQuery(sql, args) : db.rawQuery(sql, null);
+  let binds: any[] | null = null;
+  if (args && args.length) {
+    binds = args.map(function (v: any) {
+      // Same bridge hardening as dbExec: bind numbers as strings, and fail
+      // loudly on null/undefined instead of letting rawQuery swallow them.
+      if (v === null || v === undefined) throw new Error('Null bind value in query: ' + sql);
+      if (typeof v === 'number') return String(v);
+      return v;
+    });
+  }
+  const cur = binds ? db.rawQuery(sql, binds) : db.rawQuery(sql, null);
   const rows: SqlRow[] = [];
   try {
     if (cur.moveToFirst()) {

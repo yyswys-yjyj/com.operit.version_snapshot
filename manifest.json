@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "com.operit.version_snapshot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": ["yyswys-yjyj"],
   "main": "dist/main.js",
   "display_name": {

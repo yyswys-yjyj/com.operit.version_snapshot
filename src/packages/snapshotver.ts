@@ -94,23 +94,41 @@ METADATA
         },
         {
             "name": "Rollback",
-            "description": "Roll back to a node (TargetVersion=DisplayVersion): physically rewrites the project directories to the target content, deletes all snapshots after the target (irreversible), and resyncs the staging area against the rolled-back head.",
+            "description": "Roll back to a node (TargetVersion=DisplayVersion): physically rewrites the project directories to the target content, deletes all snapshots after the target, and resyncs the staging area against the rolled-back head. IRREVERSIBLE - requires confirm=true to execute.",
             "parameters": [
                 { "name": "ProjectID", "description": "Project name", "type": "string", "required": true },
-                { "name": "TargetVersion", "description": "Target DisplayVersion", "type": "string", "required": true }
+                { "name": "TargetVersion", "description": "Target DisplayVersion", "type": "string", "required": true },
+                { "name": "confirm", "description": "Must be true to actually roll back (irreversible), default false", "type": "boolean", "required": false }
             ]
         },
         {
             "name": "DestroyDatabase",
-            "description": "Permanently delete a project's snapshot database folder (manifest.json + data.db + all history). IRREVERSIBLE - there is no undo.",
+            "description": "Permanently delete a project's snapshot database folder (manifest.json + data.db + all history). IRREVERSIBLE - requires confirm=true to execute.",
             "parameters": [
-                { "name": "ProjectID", "description": "Project name whose database folder will be removed", "type": "string", "required": true }
+                { "name": "ProjectID", "description": "Project name whose database folder will be removed", "type": "string", "required": true },
+                { "name": "confirm", "description": "Must be true to actually delete (irreversible), default false", "type": "boolean", "required": false }
+            ]
+        },
+        {
+            "name": "GetManifest",
+            "description": "Return a project's snapshot metadata: rootPath, mounts, ignore file, size limit, inheritance, creation time and the database folder path.",
+            "parameters": [
+                { "name": "ProjectID", "description": "Project name", "type": "string", "required": true }
+            ]
+        },
+        {
+            "name": "IntervalDiff",
+            "description": "Compare all versions inside a range (LeftVersion..RightVersion as DisplayVersions, oldest/newest auto-normalized): rebuilds the complete file states at both endpoints and reports every add/modify/delete across that interval, plus a per-version change listing. Returns whether a historical (non-head) right endpoint was reconstructed.",
+            "parameters": [
+                { "name": "ProjectID", "description": "Project name", "type": "string", "required": true },
+                { "name": "LeftVersion", "description": "Left boundary DisplayVersion, e.g. 1.0.0", "type": "string", "required": true },
+                { "name": "RightVersion", "description": "Right boundary DisplayVersion, e.g. 1.0.2", "type": "string", "required": true }
             ]
         }
     ]
 }*/
 
-import { doCommit, doShow, doList, doDiff } from '../engine/core';
+import { doCommit, doShow, doList, doDiff, doGetManifest, doIntervalDiff } from '../engine/core';
 import { doInit, doManage, doChangeCommitNode, doPull, doRollback, doDestroyDatabase } from '../engine/history';
 
 type Handler = (params: any) => Promise<any>;
@@ -122,6 +140,8 @@ const handlers: { [key: string]: Handler } = {
   show: (params: any) => doShow(params.ProjectID, params),
   list: (params: any) => doList(params.ProjectID, params),
   diff: (params: any) => doDiff(params.ProjectID, params),
+  GetManifest: (params: any) => doGetManifest(params.ProjectID, params),
+  IntervalDiff: (params: any) => doIntervalDiff(params.ProjectID, params),
   ChangeCommitNode: (params: any) => doChangeCommitNode(params.ProjectID, params),
   PullFromHistory: (params: any) => doPull(params.ProjectID, params),
   Rollback: (params: any) => doRollback(params.ProjectID, params),
@@ -144,6 +164,8 @@ const api = {
   show: (params: any) => wrapTool('show', params),
   list: (params: any) => wrapTool('list', params),
   diff: (params: any) => wrapTool('diff', params),
+  GetManifest: (params: any) => wrapTool('GetManifest', params),
+  IntervalDiff: (params: any) => wrapTool('IntervalDiff', params),
   ChangeCommitNode: (params: any) => wrapTool('ChangeCommitNode', params),
   PullFromHistory: (params: any) => wrapTool('PullFromHistory', params),
   Rollback: (params: any) => wrapTool('Rollback', params),
@@ -159,6 +181,8 @@ export const commit = api.commit;
 export const show = api.show;
 export const list = api.list;
 export const diff = api.diff;
+export const GetManifest = api.GetManifest;
+export const IntervalDiff = api.IntervalDiff;
 export const ChangeCommitNode = api.ChangeCommitNode;
 export const PullFromHistory = api.PullFromHistory;
 export const Rollback = api.Rollback;

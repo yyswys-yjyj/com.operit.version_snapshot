@@ -4,7 +4,7 @@ import {
   openDb, dbQuery, dbExec, dbInsert, dbClose, dbClose as _dc, ensureSchema, withTx, SqlRow,
 } from './sqlite';
 import { requireProject, normalizeMounts, parseRelPath } from './paths';
-import { nowIso } from './base64';
+import { nowIso, DEFAULT_MAX_FILE_MB } from './base64';
 import { packDr, getFinalContent, getOriginalContent } from './format';
 import type { Manifest } from './paths';
 export { dbClose };
@@ -214,6 +214,96 @@ export async function doShow(ProjectID: string, params: any): Promise<any> {
   } finally {
     dbClose(db);
   }
+}
+
+export async function doIntervalDiff(ProjectID: string, params: any): Promise<any> {
+  const { pdir } = await requireProject(ProjectID);
+  if (!params.LeftVersion || !params.RightVersion) {
+    throw new Error('LeftVersion and RightVersion are required');
+  }
+  const db = openDb(pdir + '/data.db');
+  try {
+    ensureSchema(db);
+    const left = findSnapshotByDisplay(db, params.LeftVersion);
+    const right = findSnapshotByDisplay(db, params.RightVersion);
+    let lo = left;
+    let hi = right;
+    if (lo.id > hi.id) { const t = lo; lo = hi; hi = t; }
+    if (lo.id === hi.id) {
+      return { success: true, message: 'Interval is empty (left == right version)', data: { left: params.LeftVersion, right: params.RightVersion, totalChanged: 0, files: [] } };
+    }
+    const loId = Number(lo.id);
+    const hiId = Number(hi.id);
+    if (!Number.isFinite(loId) || !Number.isFinite(hiId)) {
+      throw new Error('Invalid snapshot boundary ids for ' + params.LeftVersion + ' / ' + params.RightVersion);
+    }
+    // Rebuild the complete file states at both endpoints (stored as incremental
+    // streams, so a historical version's state must be reconstructed first).
+    const treeLo = rebuildSnapshotTree(db, loId);
+    const treeHi = rebuildSnapshotTree(db, hiId);
+    const keys: { [k: string]: number } = {};
+    for (const k of Object.keys(treeLo)) keys[k] = 1;
+    for (const k of Object.keys(treeHi)) keys[k] = 1;
+    const files: any[] = [];
+    for (const key of Object.keys(keys)) {
+      const a = treeLo[key];
+      const b = treeHi[key];
+      const sep = key.indexOf('\u0000');
+      const mount = key.slice(0, sep);
+      const rel = key.slice(sep + 1);
+      if (!a) {
+        files.push({ mount, rel_path: rel, change_type: 'add', isBinary: b.isBinary, detail: b.isBinary ? '(binary)' : lineDiff('', b.content) });
+      } else if (!b) {
+        files.push({ mount, rel_path: rel, change_type: 'delete', isBinary: a.isBinary, detail: '(removed within interval)' });
+      } else if (a.content !== b.content) {
+        const bin = a.isBinary || b.isBinary;
+        files.push({ mount, rel_path: rel, change_type: 'modify', isBinary: bin, detail: bin ? '(binary diff)' : lineDiff(a.content, b.content) });
+      }
+    }
+    // Per-version change listing inside the interval, oldest first.
+    const versions = dbQuery(db,
+      'SELECT id, version_id, display_version, description, author, created_at FROM snapshots WHERE id>=? AND id<=? ORDER BY id ASC',
+      [loId, hiId]);
+    const versionDetail = versions.map((v: any) => {
+      const cnt = dbQuery(db, 'SELECT COUNT(*) AS c FROM snapshot_files WHERE snapshot_id=?', [v.id]);
+      return { version_id: v.version_id, display_version: v.display_version, description: v.description, author: v.author, created_at: v.created_at, changeFiles: cnt.length ? cnt[0].c : 0 };
+    });
+    return {
+      success: true,
+      message: 'Interval diff: ' + lo.display_version + ' -> ' + hi.display_version + ', ' + files.length + ' file differences',
+      data: {
+        left: lo.display_version,
+        right: hi.display_version,
+        leftSnapshotId: lo.id,
+        rightSnapshotId: hi.id,
+        versionCount: versionDetail.length,
+        totalChanged: files.length,
+        files,
+        versions: versionDetail,
+      },
+    };
+  } finally {
+    dbClose(db);
+  }
+}
+
+export async function doGetManifest(ProjectID: string, params: any): Promise<any> {
+  const { pdir, mf } = await requireProject(ProjectID);
+  return {
+    success: true,
+    message: 'Project manifest',
+    data: {
+      projectId: mf.projectId,
+      pdir,
+      rootPath: mf.rootPath,
+      createdAt: mf.createdAt ?? null,
+      extendsFrom: mf.extendsFrom ?? null,
+      multiple: !!mf.multiple,
+      maxFileSizeMB: mf.maxFileSizeMB ?? DEFAULT_MAX_FILE_MB,
+      mounts: normalizeMounts(mf),
+      ignorePath: mf.ignorePath ?? null,
+    },
+  };
 }
 
 export async function doList(ProjectID: string, params: any): Promise<any> {
