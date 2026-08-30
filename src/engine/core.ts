@@ -3,8 +3,8 @@
 import {
   openDb, dbQuery, dbExec, dbInsert, dbClose, dbClose as _dc, ensureSchema, withTx, SqlRow,
 } from './sqlite';
-import { requireProject, normalizeMounts, parseRelPath } from './paths';
-import { nowIso, DEFAULT_MAX_FILE_MB } from './base64';
+import { requireProject, normalizeMounts, normalizeMountConfigs, parseRelPath } from './paths';
+import { nowIso, DEFAULT_MAX_FILE_MB, fsExists } from './base64';
 import { packDr, getFinalContent, getOriginalContent } from './format';
 import type { Manifest } from './paths';
 export { dbClose };
@@ -74,27 +74,26 @@ export function lineDiff(oldText: string | null | undefined, newText: string | n
 }
 
 // Changes between the staging area and the latest snapshot (used by commit).
+// Both sides load in memory once; per-file lookup never hits the bridge.
 function computeChanges(db: any, head: SqlRow | null) {
   const stagingRows = dbQuery(db, 'SELECT mount, rel_path, content, is_binary, state FROM staging');
-  const changes: Array<{ mount: string; rel_path: string; change_type: string; is_binary: number; content: string }> = [];
   const headId = head ? head.id : 0;
+  const headTree = rebuildSnapshotTree(db, headId);
+  const changes: Array<{ mount: string; rel_path: string; change_type: string; is_binary: number; content: string }> = [];
   for (const st of stagingRows) {
+    if (st.state === 'unchanged') continue; // rollback baseline anchor, not a real change
     if (st.state === 'pending_delete') {
       changes.push({ mount: st.mount, rel_path: st.rel_path, change_type: 'delete', is_binary: Number(st.is_binary), content: st.content });
       continue;
     }
-    const prev = fileStateAt(db, headId, st.mount, st.rel_path);
-    if (prev.exists && prev.content === st.content) continue; // identical -> skip
-    let content: string;
-    if (prev.exists) {
-      content = packDr(prev.content, st.content);
-    } else {
-      content = st.content;
-    }
+    const h = headTree[st.mount + '\u0000' + st.rel_path];
+    const exists = !!h;
+    if (exists && h.isBinary === Number(st.is_binary) && h.content === st.content) continue; // identical -> skip
+    const content = exists ? packDr(h.content, st.content) : st.content;
     changes.push({
       mount: st.mount,
       rel_path: st.rel_path,
-      change_type: prev.exists ? 'modify' : 'add',
+      change_type: exists ? 'modify' : 'add',
       is_binary: Number(st.is_binary),
       content,
     });
@@ -189,19 +188,22 @@ export async function doShow(ProjectID: string, params: any): Promise<any> {
     }
     const lines: string[] = [];
     const order = Object.keys(mounts);
+    const headTree = rebuildSnapshotTree(db, headId);
     for (const m of order) {
       const list = byMount[m] || [];
       let changed = 0;
+      let same = 0;
       for (const r of list) {
         if (r.state === 'pending_delete') { changed++; continue; }
-        const prev = fileStateAt(db, headId, m, r.rel_path);
-        if (!prev.exists || prev.content !== r.content) changed++;
+        if (r.state === 'unchanged') { same++; continue; }
+        const h = headTree[m + '\u0000' + r.rel_path];
+        if (!h || h.isBinary !== Number(r.is_binary) || h.content !== r.content) changed++;
       }
       lines.push('========================================');
-      lines.push('Mount: ' + m + ' | staged ' + list.length + ' files | changed ' + changed);
+      lines.push('Mount: ' + m + ' | staged ' + list.length + ' files | changed ' + changed + (same ? ' | unchanged ' + same : ''));
       lines.push('========================================');
       for (const r of list) {
-        const tag = r.state === 'pending_delete' ? '[DEL]' : (r.state === 'pending_add' ? '[ADD]' : '[MOD]');
+        const tag = r.state === 'pending_delete' ? '[DEL]' : (r.state === 'pending_add' ? '[ADD]' : (r.state === 'unchanged' ? '[SAME]' : '[MOD]'));
         lines.push(tag + ' ' + r.rel_path);
       }
       lines.push('');
@@ -289,6 +291,16 @@ export async function doIntervalDiff(ProjectID: string, params: any): Promise<an
 
 export async function doGetManifest(ProjectID: string, params: any): Promise<any> {
   const { pdir, mf } = await requireProject(ProjectID);
+  // Auto-discovered .gitignore files: every mount root's own .gitignore is
+  // loaded at runtime (in addition to explicit global / mount ignore files).
+  const configs = normalizeMountConfigs(mf);
+  const autoIgnoreFiles: string[] = [];
+  const mountIgnore: { [key: string]: string | null } = {};
+  for (const k of Object.keys(configs)) {
+    const gi = configs[k].path + '/.gitignore';
+    if (gi !== mf.ignorePath && gi !== configs[k].ignorePath && (await fsExists(gi))) autoIgnoreFiles.push(gi);
+    mountIgnore[k] = configs[k].ignorePath ?? null;
+  }
   return {
     success: true,
     message: 'Project manifest',
@@ -302,6 +314,8 @@ export async function doGetManifest(ProjectID: string, params: any): Promise<any
       maxFileSizeMB: mf.maxFileSizeMB ?? DEFAULT_MAX_FILE_MB,
       mounts: normalizeMounts(mf),
       ignorePath: mf.ignorePath ?? null,
+      mountIgnore,
+      autoIgnoreFiles,
     },
   };
 }

@@ -17,6 +17,17 @@ const BINARY_EXT = new Set([
   'war', 'ear', 'jad', 'pcap',
 ]);
 
+// Extensions that are treated as text without scanning bytes for NUL. This
+// skips the per-file O(size) NUL sweep on large text files during adds.
+const TEXT_EXT = new Set([
+  'txt', 'md', 'markdown', 'json', 'json5', 'ts', 'tsx', 'js', 'mjs', 'cjs', 'jsx',
+  'py', 'rb', 'go', 'rs', 'c', 'h', 'cpp', 'hpp', 'cc', 'cs', 'java', 'kt', 'kts',
+  'sql', 'yaml', 'yml', 'toml', 'ini', 'conf', 'cfg', 'properties', 'env', 'sh',
+  'bash', 'zsh', 'fish', 'bat', 'cmd', 'ps1', 'html', 'htm', 'css', 'scss', 'sass',
+  'less', 'xml', 'svg', 'csv', 'tsv', 'log', 'gradle', 'gitignore', 'editorconfig',
+  'dockerfile', 'makefile', 'vim', 'lua', 'pl', 'php', 'swift', 'dart',
+]);
+
 export function nowIso(): string {
   const d = new Date();
   const pad = (n: number) => (n < 10 ? '0' + n : '' + n);
@@ -71,15 +82,30 @@ function looksBinaryByExt(name: string): boolean {
   if (idx < 0) return false;
   return BINARY_EXT.has(name.slice(idx + 1).toLowerCase());
 }
+function looksTextByExt(name: string): boolean {
+  const idx = name.lastIndexOf('.');
+  if (idx < 0) return false;
+  return TEXT_EXT.has(name.slice(idx + 1).toLowerCase());
+}
 
 // Read a file as { isBinary, content }. isBinary=0 -> UTF-8 text, isBinary=1 -> base64.
 export async function readFileToEntry(fullPath: string): Promise<{ isBinary: number; content: string }> {
+  const name = String(fullPath).split('/').pop() || '';
+  // Fast path: known text extensions read directly as text, skipping the
+  // base64 round-trip and the O(size) NUL sweep entirely.
+  if (looksTextByExt(name)) {
+    const r = await (Tools as any).Files.read(fullPath, 'android');
+    return { isBinary: 0, content: r && r.content !== undefined ? String(r.content) : '' };
+  }
   const bin = await (Tools as any).Files.readBinary(fullPath, 'android');
   const b64 = bin && bin.contentBase64 ? String(bin.contentBase64) : '';
   const bytes = b64ToBytes(b64);
+  // Known binary extension: no NUL sweep needed.
+  if (looksBinaryByExt(name)) {
+    return { isBinary: 1, content: b64 };
+  }
   const hasNul = bytesContainNul(bytes);
-  const isBinary = hasNul || looksBinaryByExt(String(fullPath).split('/').pop() || '');
-  return { isBinary: isBinary ? 1 : 0, content: isBinary ? b64 : bytesToUtf8(bytes) };
+  return { isBinary: hasNul ? 1 : 0, content: hasNul ? b64 : bytesToUtf8(bytes) };
 }
 
 // Write a record back to disk.

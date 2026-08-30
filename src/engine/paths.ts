@@ -10,7 +10,12 @@ export interface Manifest {
   extendsFrom?: string | null;
   multiple?: boolean;
   maxFileSizeMB?: number;
-  mounts?: { [key: string]: { path: string } };
+  mounts?: { [key: string]: { path: string; ignorePath?: string | null } };
+  ignorePath?: string | null;
+}
+
+export interface MountConfig {
+  path: string;
   ignorePath?: string | null;
 }
 
@@ -75,6 +80,29 @@ export async function saveManifest(pdir: string, manifest: Manifest): Promise<vo
   await (Tools as any).Files.write(pdir + '/manifest.json', JSON.stringify(manifest, null, 2), false, 'android');
 }
 
+// Whitelisted metadata updates used by manage OtherParam.metadata. Only
+// ignorePath and maxFileSizeMB are mutable post-init; rootPath/mounts stay
+// fixed to keep the project definition stable and safe.
+export async function updateManifestMetadata(mf: Manifest, pdir: string, meta: any): Promise<Manifest> {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) throw new Error('OtherParam.metadata must be a JSON object');
+  const allowed = ['ignorePath', 'maxFileSizeMB'];
+  for (const k of Object.keys(meta)) {
+    if (allowed.indexOf(k) < 0) throw new Error('Unsupported metadata field: ' + k + ' (allowed: ' + allowed.join(', ') + ')');
+  }
+  if ('ignorePath' in meta) {
+    const ip = meta.ignorePath === null || meta.ignorePath === '' ? null : String(meta.ignorePath).trim();
+    if (ip && !(await fsExists(ip))) throw new Error('ignorePath does not exist: ' + ip);
+    mf.ignorePath = ip;
+  }
+  if ('maxFileSizeMB' in meta) {
+    const m = Number(meta.maxFileSizeMB);
+    if (!Number.isFinite(m) || m < 0) throw new Error('maxFileSizeMB must be a non-negative number');
+    mf.maxFileSizeMB = m;
+  }
+  await saveManifest(pdir, mf);
+  return mf;
+}
+
 export async function requireProject(ProjectID: string): Promise<{ pdir: string; mf: Manifest }> {
   const pdir = projectDir(ProjectID);
   const mf = await loadManifest(pdir);
@@ -84,16 +112,28 @@ export async function requireProject(ProjectID: string): Promise<{ pdir: string;
 
 // Normalized mounts: { mountKey: absolutePath }.
 export function normalizeMounts(mf: Manifest): { [key: string]: string } {
-  const mounts: { [key: string]: string } = {};
+  const out: { [key: string]: string } = {};
+  const configs = normalizeMountConfigs(mf);
+  for (const k of Object.keys(configs)) out[k] = configs[k].path;
+  return out;
+}
+
+// Full mount configs including each mount's own (isolated) ignore file.
+export function normalizeMountConfigs(mf: Manifest): { [key: string]: MountConfig } {
+  const out: { [key: string]: MountConfig } = {};
   if (mf.mounts && typeof mf.mounts === 'object') {
     for (const k of Object.keys(mf.mounts)) {
       const v = (mf.mounts as any)[k];
-      mounts[k] = v && typeof v === 'object' ? v.path : v;
+      if (v && typeof v === 'object') {
+        out[k] = { path: v.path, ignorePath: v.ignorePath ?? null };
+      } else {
+        out[k] = { path: String(v), ignorePath: null };
+      }
     }
   } else {
-    mounts._main = mf.rootPath;
+    out._main = { path: mf.rootPath, ignorePath: null };
   }
-  return mounts;
+  return out;
 }
 
 // Reject any relative path escaping the mount root ('.' or '..' segments,
@@ -143,30 +183,61 @@ export function parseRelPath(mf: Manifest, input: string): ResolvedPath {
   return { mount: '_main', relPath: assertSafeRelPath(s) };
 }
 
-// .gitignore rules from UseIgnore path + each mount root's own .gitignore.
-export async function loadIgnoreRulesAll(mf: Manifest): Promise<IgnoreRule[]> {
-  const mounts = normalizeMounts(mf);
-  let rules: IgnoreRule[] = [];
+// .gitignore loading with mount scoping:
+// - global:   manifest.ignorePath (top-level UseIgnore entry / OtherParam
+//   metadata update) -> applies to every mount.
+// - perMount: each mount's own UseIgnore (declared inside its entry) plus its
+//   root .gitignore (auto-discovered) -> applies ONLY to that mount, never
+//   bleeding into other mounts (mount-local ignore is isolated).
+export interface IgnoreContext {
+  global: IgnoreRule[];
+  perMount: { [key: string]: IgnoreRule[] };
+}
+
+export async function loadIgnoreRulesAll(mf: Manifest): Promise<IgnoreContext> {
+  const configs = normalizeMountConfigs(mf);
+  const global: IgnoreRule[] = [];
   if (mf.ignorePath && (await fsExists(mf.ignorePath))) {
-    rules = rules.concat(compileGitignore(await fsReadText(mf.ignorePath)));
+    global.push(...compileGitignore(await fsReadText(mf.ignorePath)));
   }
-  for (const k of Object.keys(mounts)) {
-    const gi = mounts[k] + '/.gitignore';
-    if (gi !== mf.ignorePath && (await fsExists(gi))) {
-      rules = rules.concat(compileGitignore(await fsReadText(gi)));
+  const perMount: { [key: string]: IgnoreRule[] } = {};
+  for (const k of Object.keys(configs)) {
+    const cfg = configs[k];
+    const rules: IgnoreRule[] = [];
+    if (cfg.ignorePath) {
+      const ip = cfg.ignorePath;
+      if (ip !== mf.ignorePath && (await fsExists(ip))) {
+        rules.push(...compileGitignore(await fsReadText(ip)));
+      }
     }
+    const gi = cfg.path + '/.gitignore';
+    if (gi !== mf.ignorePath && gi !== cfg.ignorePath && (await fsExists(gi))) {
+      rules.push(...compileGitignore(await fsReadText(gi)));
+    }
+    perMount[k] = rules;
   }
-  return rules;
+  return { global, perMount };
 }
 
 // Recursive tree walk; skips the snapshot data root itself to avoid self capture.
+// ignoreRules apply only to untracked files (matching git): tracked keys passed
+// in trackedKeys (relative paths, true) are kept even when ignored. A directory
+// ignored by the rules is pruned unless a tracked file lives under it.
 export async function scanTree(
   basePath: string,
   ignoreRules: IgnoreRule[],
-  skipPath: string
+  skipPath: string,
+  trackedKeys?: { [key: string]: boolean }
 ): Promise<Array<{ full: string; rel: string; size: number }>> {
   const out: Array<{ full: string; rel: string; size: number }> = [];
   const snapRoot = getSnapshotRoot();
+  function hasTrackedUnder(prefix: string): boolean {
+    if (!trackedKeys) return false;
+    for (const k of Object.keys(trackedKeys)) {
+      if (k.startsWith(prefix)) return true;
+    }
+    return false;
+  }
   async function walk(dir: string, rel: string): Promise<void> {
     const listing = await fsList(dir);
     const entries = (listing && listing.entries) || [];
@@ -176,10 +247,16 @@ export async function scanTree(
       if (snapRoot && (childAbs === snapRoot || childAbs.startsWith(snapRoot + '/'))) continue;
       if (skipPath && (childAbs === skipPath || childAbs.startsWith(skipPath + '/'))) continue;
       if (ent.isDirectory) {
-        if (ignoreRules && ignoreRules.length && gitignoreIsIgnored(ignoreRules, childRel, true)) continue;
+        if (ignoreRules && ignoreRules.length && gitignoreIsIgnored(ignoreRules, childRel, true)) {
+          // Ignored untracked dir: prune unless it contains tracked files.
+          if (!hasTrackedUnder(childRel + '/')) continue;
+        }
         await walk(childAbs, childRel);
       } else {
-        if (ignoreRules && ignoreRules.length && gitignoreIsIgnored(ignoreRules, childRel, false)) continue;
+        if (ignoreRules && ignoreRules.length && gitignoreIsIgnored(ignoreRules, childRel, false)) {
+          // Ignore applies only to untracked files; tracked ones stay visible.
+          if (!trackedKeys || !trackedKeys[childRel]) continue;
+        }
         out.push({ full: childAbs, rel: childRel, size: ent.size });
       }
     }
